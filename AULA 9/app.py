@@ -1,127 +1,201 @@
+import threading
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 import cv2
-import numpy as np
-import pyautogui
-import streamlit as st
+from PIL import Image, ImageTk
+import spacy
 from ultralytics import YOLO
 
-# Desativar pausas padrão do PyAutoGUI para maior fluidez
-pyautogui.PAUSE = 0
-pyautogui.FAILSAFE = True  # Mova o mouse para o canto superior esquerdo para interromper em emergência
 
-# Configuração da página Streamlit
-st.set_page_config(page_title="Controle de Mouse por Gestos - YOLO", layout="wide")
-st.title("🖱️ Controle do Mouse em Tempo Real via Mão (YOLO Pose)")
-st.caption("Visão Computacional + PyAutoGUI executando em CPU local")
+class YoloScannerApp:
+    """
+    Aplicações Tkinter com suporte a processamento em background (Threading)
+    para detecção de objetos via YOLOv8 e análise de NLP com spaCy.
+    """
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Scanner Inteligente com YOLO & spaCy")
+        self.root.geometry("850x680")
+        self.root.config(bg="#f0f2f5")
 
-# Obter dimensão da tela do monitor
-screen_width, screen_height = pyautogui.size()
+        self.center_window()
 
-# Sidebar de Configurações
-st.sidebar.header("⚙️ Configurações do Controle")
-conf_threshold = st.sidebar.slider("Confiança do YOLO", 0.1, 1.0, 0.4, 0.05)
-smoothing = st.sidebar.slider("Fator de Suavização (Smoothing)", 0.1, 0.9, 0.5, 0.05,
-                              help="Valores maiores deixam o cursor mais estável, porém com leve atraso.")
-frame_margin = st.sidebar.slider("Margem de Borda (Pixels)", 20, 150, 80, 10,
-                                help="Área limite da câmera mapeada para as pontas da tela.")
+        # Variáveis de controle
+        self.yolo_model = None
+        self.nlp = None
+        self.image_path = None
 
-enable_control = st.sidebar.checkbox("Ativar Controle do Mouse", value=True)
+        self.create_widgets()
+        
+        # Carrega os modelos em background para não congelar a abertura do app
+        threading.Thread(target=self.load_models, daemon=True).start()
 
-# 1. Carregamento do Modelo de Pose leve
-@st.cache_resource
-def load_pose_model():
-    # yolov8n-pose detecta os 17 pontos articulares do corpo humano
-    return YOLO("yolov8n-pose.pt")
+    def center_window(self):
+        """Centraliza a janela principal na tela."""
+        self.root.update_idletasks()
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        x = (self.root.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.root.winfo_screenheight() // 2) - (height // 2)
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
 
-model = load_pose_model()
+    def load_models(self):
+        """Carrega os modelos de IA assincronamente."""
+        self.update_status("Carregando modelos de IA, aguarde...")
+        
+        # 1. Modelo YOLO
+        try:
+            self.yolo_model = YOLO("yolov8n.pt")
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Erro YOLO", f"Falha ao carregar YOLO: {e}"))
 
-# Placeholders do Streamlit para o feed e métricas
-col1, col2 = st.columns([3, 1])
-with col1:
-    frame_placeholder = st.empty()
-with col2:
-    st.subheader("📊 Métricas")
-    metric_x = st.empty()
-    metric_y = st.empty()
-    st.info("💡 **Dica:** Levantar o pulso/mão direita controla o cursor no monitor.")
+        # 2. Modelo spaCy
+        try:
+            self.nlp = spacy.load("pt_core_news_sm")
+        except Exception:
+            try:
+                self.nlp = spacy.blank("pt")
+            except Exception:
+                self.nlp = None
 
-# Botão de Iniciar/Parar
-run_app = st.checkbox("Ligar Câmera", value=True)
+        self.update_status("Modelos carregados com sucesso! Selecione uma imagem.")
+        self.root.after(0, lambda: self.btn_load.config(state=tk.NORMAL))
 
-# Variáveis globais para suavização (Exponential Moving Average)
-prev_x, prev_y = 0, 0
-
-if run_app:
-    # Captura da webcam local via OpenCV
-    cap = cv2.VideoCapture(0)
-
-    # Definir resolução da webcam
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-
-    while cap.isOpened() and run_app:
-        success, frame = cap.read()
-        if not success:
-            st.error("Não foi possível acessar a câmera.")
-            break
-
-        # Espelhar imagem horizontalmente para navegação natural (modo espelho)
-        frame = cv2.flip(frame, 1)
-        h, w, _ = frame.shape
-
-        # Inferência com YOLO Pose na CPU
-        results = model.predict(
-            source=frame,
-            conf=conf_threshold,
-            imgsz=320,  # Redução para manter alto FPS na CPU
-            device="cpu",
-            verbose=False
+    def create_widgets(self):
+        """Cria os componentes gráficos da aplicação."""
+        title_label = tk.Label(
+            self.root,
+            text="Scanner Inteligente com YOLO & spaCy",
+            font=("Arial", 16, "bold"),
+            bg="#f0f2f5",
+            fg="#333333"
         )
+        title_label.pack(pady=(15, 5))
 
-        annotated_frame = results[0].plot()
+        # Status Bar / Label informativo
+        self.status_label = tk.Label(
+            self.root,
+            text="Iniciando aplicação...",
+            font=("Arial", 9, "italic"),
+            bg="#f0f2f5",
+            fg="#666666"
+        )
+        self.status_label.pack(pady=(0, 10))
 
-        # Verificar se detectou algum corpo/keypoints
-        if results[0].keypoints is not None and len(results[0].keypoints.xy) > 0:
-            # Pegar keypoints da primeira pessoa detectada
-            keypoints = results[0].keypoints.xy[0].cpu().numpy()
+        # Botão para carregar imagem (desabilitado até carregar modelos)
+        self.btn_load = tk.Button(
+            self.root,
+            text="Carregar e Analisar Imagem",
+            command=self.on_click_load,
+            font=("Arial", 11, "bold"),
+            bg="#007bff",
+            fg="white",
+            activebackground="#0056b3",
+            activeforeground="white",
+            padx=12,
+            pady=6,
+            state=tk.DISABLED
+        )
+        self.btn_load.pack(pady=5)
 
-            # No modelo YOLO Pose COCO:
-            # Índice 10 = Pulso Direito (Right Wrist)
-            # Índice 9  = Pulso Esquerdo (Left Wrist)
-            if len(keypoints) > 10:
-                wrist_x, wrist_y = keypoints[10]  # Pulso direito
+        # Painel de Imagem
+        self.image_label = tk.Label(self.root, bg="#e0e0e0", width=500, height=300)
+        self.image_label.pack(pady=10)
 
-                # Se o pulso for detectado com coordenadas válidas (>0)
-                if wrist_x > 0 and wrist_y > 0:
-                    # Desenhar ponto de destaque no pulso
-                    cv2.circle(annotated_frame, (int(wrist_x), int(wrist_y)), 12, (0, 255, 0), -1)
+        # Caixa de Texto
+        self.result_text = tk.Text(
+            self.root,
+            height=9,
+            width=90,
+            font=("Consolas", 10),
+            bg="white",
+            fg="#333333"
+        )
+        self.result_text.pack(pady=10)
+        self.result_text.insert(tk.END, "Aguardando carregamento de imagem...")
+        self.result_text.config(state=tk.DISABLED)
 
-                    # Mapeamento com margem de borda para alcance total da tela
-                    target_x = np.interp(wrist_x, [frame_margin, w - frame_margin], [0, screen_width])
-                    target_y = np.interp(wrist_y, [frame_margin, h - frame_margin], [0, screen_height])
+    def update_status(self, message):
+        """Atualiza a mensagem de status da interface."""
+        self.root.after(0, lambda: self.status_label.config(text=message))
 
-                    # Aplicação do Filtro de Suavização (EMA)
-                    curr_x = prev_x + (target_x - prev_x) * (1 - smoothing)
-                    curr_y = prev_y + (target_y - prev_y) * (1 - smoothing)
+    def on_click_load(self):
+        """Abre o seletor de arquivo e dispara o processamento em thread separada."""
+        file_path = filedialog.askopenfilename(
+            title="Selecionar Imagem",
+            filetypes=[("Imagens", "*.jpg *.jpeg *.png *.bmp")]
+        )
+        if not file_path:
+            return
 
-                    # Mover o mouse via PyAutoGUI
-                    if enable_control:
-                        pyautogui.moveTo(int(curr_x), int(curr_y))
+        self.btn_load.config(state=tk.DISABLED)
+        self.update_status("Processando imagem...")
+        
+        # Executa a inferência em background
+        threading.Thread(target=self.process_image, args=(file_path,), daemon=True).start()
 
-                    # Atualizar variáveis passadas
-                    prev_x, prev_y = curr_x, curr_y
+    def process_image(self, file_path):
+        """Executa a inferência com YOLO e a análise do spaCy."""
+        try:
+            # 1. Predição com YOLO
+            results = self.yolo_model(file_path)
+            r = results[0]
 
-                    # Atualizar métricas na interface
-                    metric_x.metric("Cursor X", f"{int(curr_x)} px")
-                    metric_y.metric("Cursor Y", f"{int(curr_y)} px")
+            # Renderiza a imagem com os bounding boxes (retorna em BGR do OpenCV)
+            im_array = r.plot()
+            im_rgb = cv2.cvtColor(im_array, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(im_rgb)
+            img.thumbnail((500, 300))
+            img_tk = ImageTk.PhotoImage(img)
 
-        # Desenhar caixa de margem/área útil na tela
-        cv2.rectangle(annotated_frame, (frame_margin, frame_margin),
-                      (w - frame_margin, h - frame_margin), (255, 255, 0), 2)
+            # Extração dos objetos detectados
+            detected_objects = []
+            for box in r.boxes:
+                cls_id = int(box.cls[0])
+                class_name = self.yolo_model.names[cls_id]
+                conf = float(box.conf[0])
+                detected_objects.append(f"{class_name} ({conf:.2f})")
 
-        # Converter BGR (OpenCV) para RGB (Streamlit)
-        frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-        frame_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
+            # 2. Montagem do Texto
+            if detected_objects:
+                description = f"Elementos detectados: {', '.join(detected_objects)}."
+            else:
+                description = "Nenhum objeto reconhecido na imagem."
 
-    cap.release()
-else:
-    st.write("Câmera desligada. Marque 'Ligar Câmera' para iniciar.")
+            # 3. Análise NLP com spaCy
+            nlp_analysis = ""
+            if self.nlp:
+                doc = self.nlp(description)
+                tokens = [token.text for token in doc if not token.is_stop and not token.is_punct]
+                nlp_analysis = f"\n[Tokens Relevantes (spaCy)]: {', '.join(tokens)}"
+
+            # 4. Atualização da Interface (sincronizada na Thread Principal)
+            self.root.after(0, self.update_ui_results, img_tk, description, nlp_analysis)
+
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Erro de Processamento", str(e)))
+            self.update_status("Erro ao processar imagem.")
+            self.root.after(0, lambda: self.btn_load.config(state=tk.NORMAL))
+
+    def update_ui_results(self, img_tk, description, nlp_analysis):
+        """Atualiza a interface gráfica após a conclusão do processamento."""
+        self.image_label.config(image=img_tk, text="")
+        self.image_label.image = img_tk  # Previne garbage collection do PIL
+
+        self.result_text.config(state=tk.NORMAL)
+        self.result_text.delete("1.0", tk.END)
+        self.result_text.insert(
+            tk.END, 
+            f"--- RELATÓRIO DE DETECÇÃO ---\n{description}\n{nlp_analysis}"
+        )
+        self.result_text.config(state=tk.DISABLED)
+
+        self.update_status("Análise concluída!")
+        self.btn_load.config(state=tk.NORMAL)
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = YoloScannerApp(root)
+    root.mainloop()
+    
